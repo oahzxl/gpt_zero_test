@@ -263,30 +263,30 @@ def fsdp_main(args):
                 )
             print(f"completed save and stats zone...")
 
-        if args.save_model and curr_val_loss < best_val_loss:
+        # if args.save_model and curr_val_loss < best_val_loss:
 
-            # save
-            if rank == 0:
-                print(f"--> entering save model state")
+        #     # save
+        #     if rank == 0:
+        #         print(f"--> entering save model state")
 
-            save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-            with FSDP.state_dict_type(
-                model, StateDictType.FULL_STATE_DICT, save_policy
-            ):
-                cpu_state = model.state_dict()
-            #print(f"saving process: rank {rank}  done w state_dict")
+        #     save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        #     with FSDP.state_dict_type(
+        #         model, StateDictType.FULL_STATE_DICT, save_policy
+        #     ):
+        #         cpu_state = model.state_dict()
+        #     #print(f"saving process: rank {rank}  done w state_dict")
 
 
-            if rank == 0:
-                print(f"--> saving model ...")
-                currEpoch = (
-                    "-" + str(epoch) + "-" + str(round(curr_val_loss.item(), 4)) + ".pt"
-                )
-                print(f"--> attempting to save model prefix {currEpoch}")
-                save_name = file_save_name + "-" + time_of_run + "-" + currEpoch
-                print(f"--> saving as model name {save_name}")
+        #     if rank == 0:
+        #         print(f"--> saving model ...")
+        #         currEpoch = (
+        #             "-" + str(epoch) + "-" + str(round(curr_val_loss.item(), 4)) + ".pt"
+        #         )
+        #         print(f"--> attempting to save model prefix {currEpoch}")
+        #         save_name = file_save_name + "-" + time_of_run + "-" + currEpoch
+        #         print(f"--> saving as model name {save_name}")
 
-                torch.save(cpu_state, save_name)
+        #         torch.save(cpu_state, save_name)
 
         if curr_val_loss < best_val_loss:
 
