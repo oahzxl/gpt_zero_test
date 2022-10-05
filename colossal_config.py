@@ -10,14 +10,6 @@ BATCH_SIZE = 8
 NUM_EPOCHS = 60
 SEQ_LEN = 512
 
-# offload
-# 4gpu 40B batch 8:  52.9
-# 4gpu 40B batch24: 147.7
-
-# parallel = dict(
-#     pipeline=24,
-#     tensor=dict(mode='2d', size=4)
-# )
 
 zero = dict(
     model_config=dict(
@@ -36,6 +28,6 @@ optimizer = dict(
 
 model = dict(
     type=gpt,
-    checkpoint=True,
+    checkpoint=False,
     dtype=torch.half,
 )
