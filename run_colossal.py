@@ -142,12 +142,25 @@ def main():
                 hooks=hook_list,
                 display_progress=True,
                 return_output_label=False)
-    # for img, label in train_dataloader:
-    #     engine.zero_grad()
-    #     output = engine(img["input_ids"].cuda(), img["attention_mask"].cuda())
-    #     loss = engine.criterion(output, label.cuda())
-    #     engine.backward(loss)
-    #     engine.step()
+
+    # from torch.profiler import profile, record_function, ProfilerActivity
+    # with profile(
+    #     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    #     schedule=torch.profiler.schedule(wait=1, warmup=10, active=20, repeat=1),
+    #     on_trace_ready=torch.profiler.tensorboard_trace_handler('./log/gpt_xl'),
+    #     record_shapes=False,
+    #     profile_memory=False,
+    #     with_stack=False
+    #     ) as prof:
+    #         for i, (img, label) in enumerate(train_dataloader):
+    #             engine.zero_grad()
+    #             output = engine(img["input_ids"].cuda(), img["attention_mask"].cuda())
+    #             # loss = engine.criterion(output, label.cuda())
+    #             # engine.backward(loss)
+    #             # engine.step()
+    #             prof.step()
+    #             if i > 35:
+    #                 break     
 
 
 if __name__ == '__main__':

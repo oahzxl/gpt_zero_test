@@ -1,28 +1,28 @@
 import os
 import argparse
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
-from transformers import AutoTokenizer, GPT2Tokenizer
-from transformers import T5Tokenizer, T5ForConditionalGeneration, GPT2LMHeadModel, GPT2Config
+from transformers import GPT2Tokenizer
+from transformers import GPT2LMHeadModel, GPT2Config
 import functools
 from torch.optim.lr_scheduler import StepLR
 import torch.nn.functional as F
 import torch.distributed as dist
-import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
-from transformers.models.t5.modeling_t5 import T5Block
 from transformers.models.gpt2.modeling_gpt2 import GPT2Block
 from dataset.fsdp_webtext import FSDPWebtextDataset
+from torch.distributed.fsdp.fully_sharded_data_parallel import (
+    FullyShardedDataParallel as FSDP,
+    CPUOffload
+)
 
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
- checkpoint_wrapper,
+#  checkpoint_wrapper,
  CheckpointImpl)
-
+import torch.distributed.algorithms._checkpoint.checkpoint_wrapper
+from fairscale.nn.checkpoint import checkpoint_wrapper, is_checkpointing, is_recomputing
 from torch.distributed.fsdp import (
-    FullyShardedDataParallel as FSDP,
+    # FullyShardedDataParallel as FSDP,
     MixedPrecision,
     BackwardPrefetch,
     ShardingStrategy,
@@ -34,12 +34,6 @@ from torch.distributed.fsdp.wrap import (
     enable_wrap,
     wrap,
 )
-from functools import partial
-from torch.utils.data import DataLoader
-from pathlib import Path
-from fsdp_example.summarization_dataset import *
-from transformers.models.t5.modeling_t5 import T5Block
-from typing import Type
 import time
 import tqdm
 from datetime import datetime
@@ -52,8 +46,20 @@ def cleanup():
     dist.destroy_process_group()
     
 def setup_model(model_name):
-    model = GPT2LMHeadModel(GPT2Config())
-    tokenizer =  GPT2Tokenizer.from_pretrained('gpt2')
+    # config = GPT2Config(n_embd=8192, n_layer=35, n_head=16) # 28B
+    # config = GPT2Config(n_embd=8192, n_layer=30, n_head=16) # 24B
+    config = GPT2Config(n_embd=8192, n_layer=25, n_head=16) # 20B
+    # config = GPT2Config(n_embd=4096, n_layer=78, n_head=16) # 15B
+    # config = GPT2Config(n_embd=1600, n_layer=48, n_head=16) # large
+    # config = GPT2Config(n_embd=512, n_layer=16, n_head=16) # test
+    # config = GPT2Config()
+
+    model = GPT2LMHeadModel(config)
+
+    for i in range(len(model.transformer.h)):
+        model.transformer.h[i] = checkpoint_wrapper(model.transformer.h[i])
+    
+    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
     tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
 
@@ -86,8 +92,12 @@ def train(args, model, rank, world_size, train_loader, optimizer, epoch, sampler
         for key in batch.keys():
             batch[key] = batch[key].to(local_rank)
         optimizer.zero_grad()
+        print(batch["source_ids"].shape)
         output = model(input_ids=batch["source_ids"],attention_mask=batch["source_mask"], labels=batch["target_ids"])
-        loss = output.loss
+        loss = output[0]
+        # output = model(batch["source_ids"], None, batch["source_mask"].type(torch.float32).requires_grad_(True),None,None,None,None,None,None,
+        #                batch["target_ids"],None,None,None,None)
+        # loss = output[0]
         loss.backward()
         optimizer.step()
         fsdp_loss[0] += loss.item()
@@ -106,32 +116,6 @@ def train(args, model, rank, world_size, train_loader, optimizer, epoch, sampler
             )
     return train_accuracy
 
-def validation(model, rank, world_size, val_loader):
-    model.eval()
-    correct = 0
-    local_rank = int(os.environ['LOCAL_RANK'])
-    fsdp_loss = torch.zeros(3).to(local_rank)
-    if rank == 0:
-        inner_pbar = tqdm.tqdm(
-            range(len(val_loader)), colour="green", desc="Validation Epoch"
-        )
-    with torch.no_grad():
-        for batch in val_loader:
-            for key in batch.keys():
-                batch[key] = batch[key].to(local_rank)
-            output = model(input_ids=batch["source_ids"],attention_mask=batch["source_mask"],labels=batch["target_ids"])
-            fsdp_loss[0] += output["loss"].item()  # sum up batch loss
-            fsdp_loss[1] += len(batch)
-
-            if rank==0:
-                inner_pbar.update(1)
-
-    dist.all_reduce(fsdp_loss, op=dist.ReduceOp.SUM)
-    val_loss = fsdp_loss[0] / fsdp_loss[1]
-    if rank == 0:
-        inner_pbar.close()
-        print(f"Validation Loss: {val_loss:.4f}")
-    return val_loss
 
 def fsdp_main(args):
 
@@ -141,16 +125,6 @@ def fsdp_main(args):
     rank = int(os.environ['RANK'])
     world_size = int(os.environ['WORLD_SIZE'])
 
-
-    dataset = load_dataset('wikihow', 'all', data_dir='data/')
-    print(dataset.keys())
-    print("Size of train dataset: ", dataset['train'].shape)
-    print("Size of Validation dataset: ", dataset['validation'].shape)
-
-
-    #wikihow(tokenizer, type_path, num_samples, input_length, output_length, print_text=False)
-    # train_dataset = wikihow(tokenizer, 'train', 1500, 512, 512, False)
-    # val_dataset = wikihow(tokenizer, 'validation', 300, 512, 512, False)
     train_dataset = FSDPWebtextDataset(os.environ['DATA'], seq_len=512)
     val_dataset = FSDPWebtextDataset(os.environ['DATA'], seq_len=512)
     
@@ -158,7 +132,6 @@ def fsdp_main(args):
     sampler2 = DistributedSampler(val_dataset, rank=rank, num_replicas=world_size)
 
     setup()
-
 
     train_kwargs = {'batch_size': args.batch_size, 'sampler': sampler1}
     test_kwargs = {'batch_size': args.test_batch_size, 'sampler': sampler2}
@@ -169,7 +142,6 @@ def fsdp_main(args):
     test_kwargs.update(cuda_kwargs)
 
     train_loader = torch.utils.data.DataLoader(train_dataset,**train_kwargs)
-    val_loader = torch.utils.data.DataLoader(val_dataset, **test_kwargs)
 
     t5_auto_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
@@ -178,10 +150,6 @@ def fsdp_main(args):
         },
     )
     torch.cuda.set_device(local_rank)
-
-
-    #init_start_event = torch.cuda.Event(enable_timing=True)
-    #init_end_event = torch.cuda.Event(enable_timing=True)
 
     #init_start_event.record()
     fpSixteen = MixedPrecision(
@@ -209,14 +177,14 @@ def fsdp_main(args):
     ) 
 
     mp_policy = fpSixteen # defaults to fp32
-
     # model is on CPU before input to FSDP
     model = FSDP(model,
         auto_wrap_policy=t5_auto_wrap_policy,
         mixed_precision=mp_policy,
         sharding_strategy=ShardingStrategy.FULL_SHARD,
         backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
-        device_id=torch.cuda.current_device()
+        device_id=torch.cuda.current_device(),
+        # cpu_offload=CPUOffload(offload_params=True),
     )
     parameter_memory = torch.cuda.max_memory_allocated() / (1024 ** 3)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
@@ -224,7 +192,6 @@ def fsdp_main(args):
     scheduler = StepLR(optimizer, step_size=1, gamma=args.gamma)
     best_val_loss = float("inf")
     curr_val_loss = float("inf")
-    file_save_name = "T5-model-"
 
     if rank == 0:
         time_of_run = get_date_of_run()
@@ -240,8 +207,7 @@ def fsdp_main(args):
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
         train_accuracy = train(args, model, rank, world_size, train_loader, optimizer, epoch, sampler=sampler1)
-        # if args.run_validation:
-        #     curr_val_loss = validation(model, rank, world_size, val_loader)
+
         scheduler.step()
 
         if rank == 0:
@@ -311,11 +277,11 @@ def fsdp_main(args):
 if __name__ == '__main__':
     # Training settings
     parser = argparse.ArgumentParser(description='PyTorch T5 FSDP Example')
-    parser.add_argument('--batch-size', type=int, default=4, metavar='N',
+    parser.add_argument('--batch-size', type=int, default=1, metavar='N',
                         help='input batch size for training (default: 64)')
     parser.add_argument('--test-batch-size', type=int, default=4, metavar='N',
                         help='input batch size for testing (default: 1000)')
-    parser.add_argument('--epochs', type=int, default=2, metavar='N',
+    parser.add_argument('--epochs', type=int, default=60, metavar='N',
                         help='number of epochs to train (default: 3)')
     parser.add_argument('--lr', type=float, default=.002, metavar='LR',
                         help='learning rate (default: .002)')
@@ -325,9 +291,9 @@ if __name__ == '__main__':
                         help='disables CUDA training')
     parser.add_argument('--seed', type=int, default=1, metavar='S',
                         help='random seed (default: 1)')
-    parser.add_argument('--track_memory', action='store_false', default=True,
+    parser.add_argument('--track_memory', action='store_false', default=False,
                         help='track the gpu memory')
-    parser.add_argument('--run_validation', action='store_false', default=True,
+    parser.add_argument('--run_validation', action='store_false', default=False,
                         help='running the validation')
     parser.add_argument('--save-model', action='store_false', default=True,
                         help='For Saving the current Model')
